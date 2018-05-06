@@ -6,8 +6,6 @@ from nltk.corpus import stopwords
 from nltk.stem.snowball import SnowballStemmer
 
 
-
-
 def listdir_nohidden(path):
     for f in os.listdir(path):
         if not f.startswith('.'):
@@ -16,8 +14,6 @@ def listdir_nohidden(path):
 def remove_stopwords(words):
     stop = set(stopwords.words('english'))
     return [ word for word in words if word not in stop and word.isalpha()]
-
-
 
 debug = 1
 base_url = 'https://en.wikipedia.org/w/api.php?'
@@ -55,13 +51,15 @@ if len(sys.argv) == 2 and sys.argv[1] == 'y':
             except IOError:
                 print('Writing to doc [' + title +'] failed.')
             
-      
+            
 # tokenize with nltk, removing stopwords
 distinct_terms = {}
+doc_names = []
 doc_tokenized = []
 number_docs = 0
 doc_lens = []   # for statistical model
 for fs in listdir_nohidden('./docs'):
+    doc_names.append(fs)
     with open('./docs/' + fs, 'r') as f:
         read_data = f.read()
         if read_data:
@@ -69,8 +67,6 @@ for fs in listdir_nohidden('./docs'):
             s = word_tokenize(read_data)
             doc_lens.append(len(s))
             doc_tokenized.append(s)
-
-#print('number of docs: ', number_docs)
 
 
 def tf_df_maxf(docs):
@@ -83,11 +79,9 @@ def tf_df_maxf(docs):
         max_freq = 0
         terms.append({})
         for term in docs[i]:
-            #term = term.lower()
-            # if distinct_terms.get(term, 0) == 0:
-            #     #print(term, term_id)
-            #     term_id += 1
-            #     distinct_terms[term] = term_id
+            if distinct_terms.get(term, -1) == -1:
+                distinct_terms[term] = term_id
+                term_id += 1
             if not terms[i]:
                 terms[i] = {term: [1, 1]}
             elif terms[i].get(term, 'NA') == 'NA':
@@ -105,28 +99,52 @@ def tf_df_maxf(docs):
     return terms, max_freqs
 
 tf_df_matrix, max_freqs = tf_df_maxf(doc_tokenized)
-if debug:
-    #print(tf_df_matrix)
-    #print(max_freqs)
-    pass
+terms_ammount = len(distinct_terms)
 
 queries = [ word_tokenize('web development design') ]
-
 tf_df_in_query, max_freqs_in_query = tf_df_maxf(queries)
 
-#print(tf_df_in_query)
 
 # constructing terms matrix (i, j)
-# print(len(distinct_terms))
-# terms_matrix = np.zeros((len(distinct_terms), number_docs))
-# for i in range(number_docs):
-#     doc = tf_df_matrix[i]
-#     for t in doc:
-#         t_index = distinct_terms[t]
-#         #print(t_index, len(terms_matrix[0]))
-#         terms_matrix[t_index][i] = doc[t][0]
+def build_terms_matrix(len_x, len_y):
+    terms_matrix = np.zeros((len_x, len_y))
+    for i in range(number_docs):
+        doc = tf_df_matrix[i]
+        for t in doc:
+            t_index = distinct_terms[t]
+            terms_matrix[t_index][i] = doc[t][0]
+    return terms_matrix
+terms_matrix = build_terms_matrix(len(distinct_terms), number_docs)
+# SVD
+u, d, vh = np.linalg.svd(terms_matrix)
+u3 = u[:, :3]
+d3 = np.diag(d[:3])
+vh3 = np.transpose(vh[:,:3])
+A3 = np.dot(np.dot(u3, d3), vh3)
+# qk = qT*uk*inverse(dk)
+qk_concept_space = []
+for q in queries:
+    q_matrix = np.zeros((terms_ammount, 1))
+    for w in q:
+        index = distinct_terms.get(w, -1)
+        if index == -1:
+            pass
+        else:
+            q_matrix[index] = 1
+    
+    qk_concept_space.append(np.dot(np.dot(np.transpose(q_matrix), u3), np.linalg.inv(d3)))
+#similarity qk and vk(documents)
+relevant_res = {}
+for i in range(number_docs):
+    for qk in qk_concept_space:
+        distance = np.dot(qk, vh3[:,i])/(np.linalg.norm(qk) * np.linalg.norm(vh3[:,i]))
+        relevant_res[distance[0]] = doc_names[i]
+sorted_relevant_res = sorted(relevant_res.items(),  reverse=True)[:5]
+print('SVD Result:', end="")
+for key in sorted_relevant_res:
+    print(' ', key[1], end="")
+print('\n')
 
-#print(terms_matrix)
 #tf_df_matrix 
 #[
 # {'word1': [f_11 df_1], 'word2': [f_21 df_2]}, -- doc 1
@@ -146,8 +164,6 @@ for doc_index in range(len(tf_df_matrix)):
     distance_d_matrix.append(distance_d)
 
     weight_tfidf.append(weight)
-#print(weight_tfidf)
-
 
 weight_query = []
 distance_q_matrix = []
@@ -164,7 +180,7 @@ for doc_index in range(len(tf_df_in_query)):
         distance_q += w_iq ** 2
         for i in range(len(tf_df_matrix)):
             nominator = 0
-            if tf_df_matrix[i].get(key, 0) == 0:
+            if tf_df_matrix[i].get(key, -1) == -1:
                 pass
             else:
                 w_ij = tf_df_matrix[i][key][0]/max_freqs[i] * math.log(number_docs/tf_df_matrix[i][key][1], 2)
@@ -173,20 +189,23 @@ for doc_index in range(len(tf_df_in_query)):
 
     distance_q = math.sqrt(distance_q)
     distance_q_matrix.append(distance_q)
-    #print(nominator_matrix)
     weight_query.append(weight)
 
-#print(weight_query)
 
-def simularity(doc_index, query_index):
+def similarity(doc_index, query_index):
     return nominator_matrix[doc_index]/(distance_q_matrix[query_index]*distance_d_matrix[doc_index])
 
-for i in range(number_docs):
-    if i % 10 == 0:
-        print('\n')
+if debug:
+    relevant_res = {}
+    for i in range(number_docs):
+        relevant_res[similarity(i, 0)] = doc_names[i]
 
-    print("%0.6f" % simularity(i, 0), end=" ")
-
+    sorted_relevant_res = sorted(relevant_res.items(),  reverse=True)[:5]
+    print('TFIDF Result:', end="")
+    for key in sorted_relevant_res:
+        print(' ', key[1], end="")
+    print('\n')
+    
 # Statistical Language Model
 # Pr(d_j | q) = Pr(q | d_j) * Pr(d_j)/Pr(q)
 
@@ -195,24 +214,18 @@ def probability(doc_index, query_index):
     query = tf_df_in_query[query_index]
     pr_ti_dj = 1.0
     for key in doc:
-        if query.get(key, 0) == 0:
+        if query.get(key, -1) == -1:
             pass
         else:
             pr_ti_dj *= math.pow(doc[key][0]/doc_lens[doc_index], query[key][0])
 
     return pr_ti_dj
+if debug:
+    relevant_res = {}
+    for i in range(number_docs):
+        relevant_res[probability(i, 0)] = doc_names[i]
 
-for i in range(number_docs):
-    if i % 10 == 0:
-        print('\n')
-
-    print("%0.6f" % probability(i, 0), end=" ")
-
-
-
-
-
-
-
-    
-    
+    sorted_relevant_res = sorted(relevant_res.items(),  reverse=True)[:5]
+    print('Statistical Model Result:', end="")
+    for key in sorted_relevant_res:
+        print(' ', key[1], end="")
